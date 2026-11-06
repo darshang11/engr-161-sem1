@@ -220,3 +220,51 @@ def flow_rate(stream):
     V = volume_moved(stream, t)
     return V / t
 
+# Average fluid speed in the pipe, v = Q / A.
+def velocity(Q, A):
+    return Q / A
+
+
+# energy, every term in kJ/day
+DT = SECONDS_PER_DAY
+
+
+# Kinetic energy carried by a stream per day, 1/2 m v^2.
+def kinetic_energy(mass_rate, v):
+    return 0.5 * mass_rate * v ** 2 * DT / 1000
+
+
+# Potential energy to lift a stream per day, m g h.
+def potential_energy(mass_rate, height):
+    return mass_rate * G * height * DT / 1000
+
+
+# Energy lost to friction along one pipe.
+def pipe_friction_loss(rho, Q, f, L, D):
+    return rho * DT * (f * (8 / math.pi ** 2) * (Q ** 3 * L) / D ** 5) / 1000
+
+
+# Energy lost in one pipe bend.
+def bend_loss(rho, Q, xi, r):
+    v = Q / (math.pi * r ** 2)
+    return (rho * Q * DT) * (xi * v ** 2 / 2) / 1000
+
+
+# Energy lost in one valve.
+def valve_loss(rho, Q, K, r):
+    v = Q / (math.pi * r ** 2)
+    return (rho * Q * DT) * (K * v ** 2 / 2) / 1000
+
+
+# Electricity the pump needs to do its work, given its efficiency.
+def pump_input(pump_work, eta_pump):
+    return pump_work / eta_pump
+
+
+# Energy wasted inside the pump, (1 - eta) E_in.
+def pump_loss(e_in, eta_pump):
+    return (1 - eta_pump) * e_in
+
+# Converts a unit's catalog kWh/day into kJ/day.
+def unit_energy(kwh_per_day):
+    return kwh_per_day * KJ_PER_KWH
