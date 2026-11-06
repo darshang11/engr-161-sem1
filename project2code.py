@@ -124,7 +124,7 @@ def filter_unit(stream_in, n_filt):
     return stream_out, fiber_waste
 
 
-# Calculates the top half of the distiller formula from W11L02 slide 14.
+# Calculates the top half of the distiller formula
 def distiller_numerator_helper(mass_in, ethanol_in, n_distill):
     return mass_in * ethanol_in * (1 / n_distill - 1)
 
@@ -186,7 +186,7 @@ def mass_balance(volume_per_day, design):
     return streams, wastes
 
 
-# density, flow rate, velocity (W11L02 slides 16-17)
+# density, flow rate, velocity
 
 # Adds up all four components of a stream.
 def total_mass(stream):
