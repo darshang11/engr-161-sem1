@@ -69,6 +69,8 @@ PIPE_COST = {
 }
 
 DUCT_COST_PER_M = 228
+DUCT_FRICTION = 0.002
+DUCT_DIAMETER = 1.0
 
 VALVE_K = {"Salvage": 800, "Questionable": 700, "Outstanding": 600, "Glorious": 500}
 
@@ -84,13 +86,56 @@ VALVE_COST = {
 BEND_XI_90 = 0.3
 BEND_COST_90 = {0.10: 128, 0.11: 190, 0.12: 700, 0.13: 1800, 0.14: 4100, 0.15: 8000}
 
+# extra energy effect: fraction of the flow that leaks out per meter of pipe
+# 0 = no leaks (the validation case assumes none)
+LEAK_FRACTION_PER_M = 0
+
+# realistic leak rate: median real leakage in Pennsylvania DEP water audits (Kunkel)
+LEAK_GAL_PER_MILE_PER_DAY = 1401
+M_PER_MILE = 1609.34
+
+# CO2 gas density at 15 C and 1 bar (Sigma-Aldrich CO2 data sheet)
+CO2_DENSITY = 1.8474
+
+
+# site layout: Site 2 (team floor plan)
+# total: 97 ft of pipe, 5 bends, 8 valves, 20 ft of CO2 ductwork
+# per-segment split is estimated from the drawing, adjust to the AutoCAD numbers
+FT = 0.3048
 SITE = {
+    "building_cost": 1300000,
+    "other_cost": 0,
+    "pump_to_ferm_m": 46 * FT,
+    "pump_to_ferm_bends": 2,
+    "ferm_to_filt_m": 30 * FT,
+    "ferm_to_filt_bends": 2,
+    "filt_to_dist_m": 8 * FT,
+    "filt_to_dist_bends": 0,
+    "dist_to_dehy_m": 8 * FT,
+    "dist_to_dehy_bends": 1,
+    "dehy_to_exit_m": 5 * FT,
+    "dehy_to_exit_bends": 0,
+    "valves": 8,
+    "duct_m": 20 * FT,
+    "ferm_height": 25 * FT,
+    "filt_height": 0,
+    "pump_rating": 9,
+}
+
+# validation layout (Site 3 from the validation document)
+VALIDATION_SITE = {
     "building_cost": 1600000 * 1.1,
     "other_cost": 12000,
-    "long_pipe_m": 15.24,
-    "short_pipe_m": 3.048,
-    "bends_long": 2,
-    "bends_short": 2,
+    "pump_to_ferm_m": 15.24,
+    "pump_to_ferm_bends": 2,
+    "ferm_to_filt_m": 0,
+    "ferm_to_filt_bends": 0,
+    "filt_to_dist_m": 0,
+    "filt_to_dist_bends": 0,
+    "dist_to_dehy_m": 3.048,
+    "dist_to_dehy_bends": 2,
+    "dehy_to_exit_m": 0,
+    "dehy_to_exit_bends": 0,
     "valves": 8,
     "duct_m": 3.048,
     "ferm_height": 12.192,
@@ -124,7 +169,7 @@ def filter_unit(stream_in, n_filt):
     return stream_out, fiber_waste
 
 
-# Calculates the top half of the distiller formula
+# Calculates the top half of the distiller formula.
 def distiller_numerator_helper(mass_in, ethanol_in, n_distill):
     return mass_in * ethanol_in * (1 / n_distill - 1)
 
@@ -167,21 +212,53 @@ def make_slurry(volume_per_day):
     return slurry
 
 
-# Runs the slurry through all four units and returns every stream and waste.
+# Removes the fraction of a stream that leaks out of a pipe of the given length.
+def pipe_leak(stream, length):
+    fraction = LEAK_FRACTION_PER_M * length
+    stream_out = {}
+    for key in stream:
+        stream_out[key] = stream[key] * (1 - fraction)
+    leaked = total_mass(stream) * fraction
+    return stream_out, leaked
+
+
+# Runs the slurry through every pipe and unit and returns every stream and waste.
 def mass_balance(volume_per_day, design):
     slurry = make_slurry(volume_per_day)
-    ferm, co2_waste = fermenter_unit(slurry, FERMENTERS[design["fermenter"]]["eff"])
-    filt, fiber_waste = filter_unit(ferm, REMOVERS[design["filter"]]["eff"])
-    dist, dist_waste = distiller_unit(filt, DISTILLERS[design["distiller"]]["eff"])
-    dehy, water_waste = dehydrator_unit(dist, REMOVERS[design["dehydrator"]]["eff"])
 
-    streams = {"slurry": slurry, "ferm": ferm, "filt": filt, "dist": dist, "dehy": dehy}
+    ferm_in, leak_pump_to_ferm = pipe_leak(slurry, SITE["pump_to_ferm_m"])
+    ferm, co2_waste = fermenter_unit(ferm_in, FERMENTERS[design["fermenter"]]["eff"])
+
+    filt_in, leak_ferm_to_filt = pipe_leak(ferm, SITE["ferm_to_filt_m"])
+    filt, fiber_waste = filter_unit(filt_in, REMOVERS[design["filter"]]["eff"])
+
+    dist_in, leak_filt_to_dist = pipe_leak(filt, SITE["filt_to_dist_m"])
+    dist, dist_waste = distiller_unit(dist_in, DISTILLERS[design["distiller"]]["eff"])
+
+    dehy_in, leak_dist_to_dehy = pipe_leak(dist, SITE["dist_to_dehy_m"])
+    dehy, water_waste = dehydrator_unit(dehy_in, REMOVERS[design["dehydrator"]]["eff"])
+
+    delivered, leak_dehy_to_exit = pipe_leak(dehy, SITE["dehy_to_exit_m"])
+
+    streams = {
+        "slurry": slurry,
+        "ferm": ferm,
+        "filt": filt,
+        "dist": dist,
+        "dehy": dehy,
+        "delivered": delivered,
+    }
     wastes = {
         "co2": co2_waste,
         "fiber": fiber_waste,
         "dist": dist_waste["sugar"] + dist_waste["water"] + dist_waste["fiber"],
         "dist_sugar": dist_waste["sugar"],
         "water": water_waste,
+        "leak_pump_to_ferm": leak_pump_to_ferm,
+        "leak_ferm_to_filt": leak_ferm_to_filt,
+        "leak_filt_to_dist": leak_filt_to_dist,
+        "leak_dist_to_dehy": leak_dist_to_dehy,
+        "leak_dehy_to_exit": leak_dehy_to_exit,
     }
     return streams, wastes
 
@@ -219,6 +296,7 @@ def flow_rate(stream):
     t = SECONDS_PER_DAY
     V = volume_moved(stream, t)
     return V / t
+
 
 # Average fluid speed in the pipe, v = Q / A.
 def velocity(Q, A):
@@ -265,6 +343,331 @@ def pump_input(pump_work, eta_pump):
 def pump_loss(e_in, eta_pump):
     return (1 - eta_pump) * e_in
 
+
 # Converts a unit's catalog kWh/day into kJ/day.
 def unit_energy(kwh_per_day):
     return kwh_per_day * KJ_PER_KWH
+
+
+# Adds up every energy term and returns pump energy, total energy in and ROI.
+def energy_balance(streams, wastes, design):
+    D = design["pipe_diameter"]
+    r = D / 2
+    f = PIPE_FRICTION[design["pipe_line"]]
+    K = VALVE_K[design["valve_line"]]
+    xi = BEND_XI_90
+    eta_pump = PUMP_EFF[design["pump_line"]]
+
+    # density and flow rate after each stage
+    rho_slurry = stream_density(streams["slurry"])
+    rho_ferm = stream_density(streams["ferm"])
+    rho_filt = stream_density(streams["filt"])
+    rho_dist = stream_density(streams["dist"])
+    rho_dehy = stream_density(streams["dehy"])
+
+    Q_slurry = flow_rate(streams["slurry"])
+    Q_ferm = flow_rate(streams["ferm"])
+    Q_filt = flow_rate(streams["filt"])
+    Q_dist = flow_rate(streams["dist"])
+    Q_dehy = flow_rate(streams["dehy"])
+
+    A = pipe_area(D)
+    v_slurry = velocity(Q_slurry, A)
+    v_ferm = velocity(Q_ferm, A)
+    v_filt = velocity(Q_filt, A)
+    v_dist = velocity(Q_dist, A)
+    v_dehy = velocity(Q_dehy, A)
+
+    # pipe friction (one per pipe segment, using the stream flowing through it)
+    friction_pump_to_ferm = pipe_friction_loss(rho_slurry, Q_slurry, f, SITE["pump_to_ferm_m"], D)
+    friction_ferm_to_filt = pipe_friction_loss(rho_ferm, Q_ferm, f, SITE["ferm_to_filt_m"], D)
+    friction_filt_to_dist = pipe_friction_loss(rho_filt, Q_filt, f, SITE["filt_to_dist_m"], D)
+    friction_dist_to_dehy = pipe_friction_loss(rho_dist, Q_dist, f, SITE["dist_to_dehy_m"], D)
+    friction_dehy_to_exit = pipe_friction_loss(rho_dehy, Q_dehy, f, SITE["dehy_to_exit_m"], D)
+
+    # bends (loss of one bend times the number of bends in that segment)
+    bends_pump_to_ferm = SITE["pump_to_ferm_bends"] * bend_loss(rho_slurry, Q_slurry, xi, r)
+    bends_ferm_to_filt = SITE["ferm_to_filt_bends"] * bend_loss(rho_ferm, Q_ferm, xi, r)
+    bends_filt_to_dist = SITE["filt_to_dist_bends"] * bend_loss(rho_filt, Q_filt, xi, r)
+    bends_dist_to_dehy = SITE["dist_to_dehy_bends"] * bend_loss(rho_dist, Q_dist, xi, r)
+    bends_dehy_to_exit = SITE["dehy_to_exit_bends"] * bend_loss(rho_dehy, Q_dehy, xi, r)
+
+    # valves (entry valve sees the stream coming in, exit valve the stream going out)
+    valve_ferm_in = valve_loss(rho_slurry, Q_slurry, K, r)
+    valve_ferm_out = valve_loss(rho_ferm, Q_ferm, K, r)
+    valve_filt_in = valve_loss(rho_ferm, Q_ferm, K, r)
+    valve_filt_out = valve_loss(rho_filt, Q_filt, K, r)
+    valve_dist_in = valve_loss(rho_filt, Q_filt, K, r)
+    valve_dist_out = valve_loss(rho_dist, Q_dist, K, r)
+    valve_dehy_in = valve_loss(rho_dist, Q_dist, K, r)
+    valve_dehy_out = valve_loss(rho_dehy, Q_dehy, K, r)
+
+    # waste streams
+    co2_pe = potential_energy(wastes["co2"], SITE["ferm_height"])
+    co2_ke = kinetic_energy(wastes["co2"], v_ferm)
+    fiber_pe = potential_energy(wastes["fiber"], SITE["filt_height"])
+    fiber_ke = kinetic_energy(wastes["fiber"], v_filt)
+    dist_waste_ke = kinetic_energy(wastes["dist"], v_dist)
+    dehy_waste_ke = kinetic_energy(wastes["water"], v_dehy)
+
+    # leaks (fluid escaping a pipe carries away the kinetic energy the pump gave it)
+    leak_pump_to_ferm_ke = kinetic_energy(wastes["leak_pump_to_ferm"], v_slurry)
+    leak_ferm_to_filt_ke = kinetic_energy(wastes["leak_ferm_to_filt"], v_ferm)
+    leak_filt_to_dist_ke = kinetic_energy(wastes["leak_filt_to_dist"], v_filt)
+    leak_dist_to_dehy_ke = kinetic_energy(wastes["leak_dist_to_dehy"], v_dist)
+    leak_dehy_to_exit_ke = kinetic_energy(wastes["leak_dehy_to_exit"], v_dehy)
+
+    # product leaving the plant (E_out)
+    product_ke = kinetic_energy(total_mass(streams["dehy"]), v_dehy)
+    product_pe = potential_energy(total_mass(streams["dehy"]), OUTPUT_HEIGHT)
+
+    # everything the pump has to supply
+    pump_work = 0
+    pump_work += friction_pump_to_ferm + friction_ferm_to_filt + friction_filt_to_dist
+    pump_work += friction_dist_to_dehy + friction_dehy_to_exit
+    pump_work += bends_pump_to_ferm + bends_ferm_to_filt + bends_filt_to_dist
+    pump_work += bends_dist_to_dehy + bends_dehy_to_exit
+    pump_work += valve_ferm_in + valve_ferm_out
+    pump_work += valve_filt_in + valve_filt_out
+    pump_work += valve_dist_in + valve_dist_out
+    pump_work += valve_dehy_in + valve_dehy_out
+    pump_work += co2_pe + co2_ke + fiber_pe + fiber_ke
+    pump_work += dist_waste_ke + dehy_waste_ke
+    pump_work += product_ke + product_pe
+    pump_work += leak_pump_to_ferm_ke + leak_ferm_to_filt_ke + leak_filt_to_dist_ke
+    pump_work += leak_dist_to_dehy_ke + leak_dehy_to_exit_ke
+
+    # pump (E_in) and its loss
+    e_pump = pump_input(pump_work, eta_pump)
+    e_pump_loss = pump_loss(e_pump, eta_pump)
+
+    # unit operations (E_unit from the catalog)
+    e_ferm = unit_energy(FERMENTERS[design["fermenter"]]["kwh"])
+    e_filt = unit_energy(REMOVERS[design["filter"]]["kwh"])
+    e_dist = unit_energy(DISTILLERS[design["distiller"]]["kwh"])
+    e_dehy = unit_energy(REMOVERS[design["dehydrator"]]["kwh"])
+    e_units = e_ferm + e_filt + e_dist + e_dehy
+
+    total_in = e_pump + e_units
+
+    # chemical energy of the ethanol out (same method as the validation sheet)
+    ethanol_volume = streams["delivered"]["ethanol"] / rho_dehy
+    chem_out = ETHANOL_MJ_PER_GAL * GAL_PER_M3 * ethanol_volume * DT * 1000
+
+    return {
+        "pump": e_pump,
+        "pump_loss": e_pump_loss,
+        "units": e_units,
+        "total_in": total_in,
+        "chem_out": chem_out,
+        "roi": chem_out / total_in,
+        "filter_v": v_ferm,
+        "dehy_waste_ke": dehy_waste_ke,
+    }
+
+
+# Adds up the price of the building, pump, units, pipes, ductwork, valves and bends.
+def capital_cost(streams, wastes, design, bend_price=None):
+    d = design["pipe_diameter"]
+
+    # inflow to each unit = previous product + its waste, over the product density
+    q_slurry = flow_rate(streams["slurry"])
+    q_filt_in = (total_mass(streams["ferm"]) + wastes["co2"]) / stream_density(streams["ferm"])
+    q_dist_in = (total_mass(streams["filt"]) + wastes["fiber"]) / stream_density(streams["filt"])
+    q_dehy_in = (total_mass(streams["dist"]) + wastes["dist"]) / stream_density(streams["dist"])
+
+    if bend_price is None:
+        bend_price = BEND_COST_90[d]
+
+    cost = SITE["building_cost"] + SITE["other_cost"]
+    cost += PUMP_COST[SITE["pump_rating"]][design["pump_line"]] * q_slurry
+    cost += FERMENTERS[design["fermenter"]]["cost"] * q_slurry
+    cost += REMOVERS[design["filter"]]["cost"] * q_filt_in
+    cost += DISTILLERS[design["distiller"]]["cost"] * q_dist_in
+    cost += REMOVERS[design["dehydrator"]]["cost"] * q_dehy_in
+    total_pipe_m = SITE["pump_to_ferm_m"] + SITE["ferm_to_filt_m"] + SITE["filt_to_dist_m"]
+    total_pipe_m += SITE["dist_to_dehy_m"] + SITE["dehy_to_exit_m"]
+    total_bends = SITE["pump_to_ferm_bends"] + SITE["ferm_to_filt_bends"] + SITE["filt_to_dist_bends"]
+    total_bends += SITE["dist_to_dehy_bends"] + SITE["dehy_to_exit_bends"]
+
+    cost += PIPE_COST[d][design["pipe_line"]] * total_pipe_m
+    cost += DUCT_COST_PER_M * SITE["duct_m"]
+    cost += VALVE_COST[d][design["valve_line"]] * SITE["valves"]
+    cost += bend_price * total_bends
+    return cost
+
+
+
+# full model
+
+# Runs mass, energy and cost for one design at one slurry volume.
+def run_model(design, volume_per_day, bend_price=None):
+    streams, wastes = mass_balance(volume_per_day, design)
+    energy = energy_balance(streams, wastes, design)
+    cost = capital_cost(streams, wastes, design, bend_price)
+
+    output = streams["delivered"]
+    gallons = flow_rate(output) * SECONDS_PER_DAY * GAL_PER_M3
+    purity = output["ethanol"] / total_mass(output)
+
+    return {
+        "cost": cost,
+        "roi": energy["roi"],
+        "gallons": gallons,
+        "purity": purity,
+        "slurry_gal": volume_per_day * GAL_PER_M3,
+        "energy": energy,
+        "wastes": wastes,
+    }
+
+
+# Scales the slurry so the design makes exactly 100,000 gal/day, then runs it.
+def run_at_target(design):
+    # everything scales with input, so run once and rescale to 100,000 gal/day
+    trial = run_model(design, 1000)
+    volume = 1000 * TARGET_GAL_PER_DAY / trial["gallons"]
+    return run_model(design, volume)
+
+
+# validation
+
+VALIDATION_DESIGN = {
+    "fermenter": "Scrap",
+    "filter": "Scrap",
+    "distiller": "Scrap",
+    "dehydrator": "Scrap",
+    "pump_line": "Cheap",
+    "pipe_line": "Nice",
+    "pipe_diameter": 0.10,
+    "valve_line": "Salvage",
+}
+
+
+# Runs the course's validation case (on its own layout) and prints each result next to its expected value.
+def run_validation():
+    global SITE
+    team_site = SITE
+    SITE = VALIDATION_SITE
+    r = run_model(VALIDATION_DESIGN, 3161.58, bend_price=100)
+    SITE = team_site
+    print("VALIDATION CASE")
+    print("Velocity into filter:", round(r["energy"]["filter_v"], 2), "m/s  (expected 4.69)")
+    print("Dehydrator waste KE:", round(r["energy"]["dehy_waste_ke"], 2), "kJ/day  (expected 1.23)")
+    print("Distiller sugar waste:", round(r["wastes"]["dist_sugar"] * SECONDS_PER_DAY), "kg/day  (expected 367,500)")
+    print("Capital cost: $", round(r["cost"]), "  (expected 1,867,000)")
+    print("Energy ROI:", round(r["roi"], 2), "  (expected 5.55)")
+    print("Ethanol out:", round(r["gallons"]), "gal/day  (expected 68,700)")
+    print("Purity:", round(r["purity"] * 100, 1), "%  (expected 87)")
+    print()
+
+
+# design search
+
+
+# Prints one design's parts and results.
+def print_design(design, r):
+    print("  Fermenter:", design["fermenter"], "| Filter:", design["filter"],
+          "| Distiller:", design["distiller"], "| Dehydrator:", design["dehydrator"])
+    print("  Pump:", design["pump_line"], "| Pipe:", design["pipe_line"], design["pipe_diameter"], "m",
+          "| Valves:", design["valve_line"])
+    print("  Capital cost: $", round(r["cost"]))
+    print("  Energy ROI:", round(r["roi"], 2))
+    print("  Ethanol out:", round(r["gallons"]), "gal/day at", round(r["purity"] * 100, 2), "%")
+    print("  Slurry needed:", round(r["slurry_gal"]), "gal/day")
+
+
+# Tries every catalog combo and prints the cheapest and highest-ROI designs that meet spec.
+def search():
+    best_cost = None
+    best_roi = None
+    count = 0
+
+    for ferm in FERMENTERS:
+        for filt in REMOVERS:
+            for dist in DISTILLERS:
+                for dehy in REMOVERS:
+                    for pump in PUMP_EFF:
+                        for pipe in PIPE_FRICTION:
+                            for diameter in PIPE_COST:
+                                for valve in VALVE_K:
+                                    design = {
+                                        "fermenter": ferm,
+                                        "filter": filt,
+                                        "distiller": dist,
+                                        "dehydrator": dehy,
+                                        "pump_line": pump,
+                                        "pipe_line": pipe,
+                                        "pipe_diameter": diameter,
+                                        "valve_line": valve,
+                                    }
+                                    r = run_at_target(design)
+                                    if r["purity"] < TARGET_PURITY:
+                                        continue
+                                    count += 1
+                                    if best_cost is None or r["cost"] < best_cost[1]["cost"]:
+                                        best_cost = (design, r)
+                                    if best_roi is None or r["roi"] > best_roi[1]["roi"]:
+                                        best_roi = (design, r)
+
+    print("DESIGN SEARCH:", count, "designs make 100,000 gal/day at 98% or better")
+    print()
+    print("Cheapest design:")
+    print_design(best_cost[0], best_cost[1])
+    print()
+    print("Highest ROI design:")
+    print_design(best_roi[0], best_roi[1])
+    print()
+    return best_cost[0]
+
+
+# leak check
+# Reruns one design with no leaks, a realistic leak rate and two worse leak rates.
+def check_leaks(design):
+    global LEAK_FRACTION_PER_M
+
+    no_leak = run_at_target(design)
+    realistic_rate = (LEAK_GAL_PER_MILE_PER_DAY / M_PER_MILE) / no_leak["slurry_gal"]
+
+    cases = [
+        ("No leaks", 0),
+        ("Realistic (water audit median)", realistic_rate),
+        ("Bad (0.01% per m)", 0.0001),
+        ("Worst (0.1% per m)", 0.001),
+    ]
+
+    print("LEAK CHECK (cheapest design, sized to 100,000 gal/day)")
+    for name, rate in cases:
+        LEAK_FRACTION_PER_M = rate
+        r = run_at_target(design)
+        print("  " + name + ":",
+              "slurry needed", round(r["slurry_gal"]), "gal/day |",
+              "ROI", round(r["roi"], 4), "|",
+              "cost $", round(r["cost"]))
+    LEAK_FRACTION_PER_M = 0
+    print()
+
+
+# duct friction check
+# Finds the friction loss in the CO2 ductwork and compares it to the rest of the plant.
+def check_duct_friction(design):
+    r = run_at_target(design)
+    co2_mass = r["wastes"]["co2"]
+    eta_pump = PUMP_EFF[design["pump_line"]]
+
+    print("CO2 DUCT FRICTION CHECK (cheapest design, sized to 100,000 gal/day)")
+    for name, rho in [("15 C", CO2_DENSITY), ("37 C (warm fermenter)", CO2_DENSITY * 288.15 / 310.15)]:
+        Q_co2 = co2_mass / rho
+        duct_loss = pipe_friction_loss(rho, Q_co2, DUCT_FRICTION, SITE["duct_m"], DUCT_DIAMETER)
+        new_total = r["energy"]["total_in"] + duct_loss / eta_pump
+        new_roi = r["energy"]["chem_out"] / new_total
+        print("  CO2 at " + name + ":",
+              "duct loss", round(duct_loss, 1), "kJ/day |",
+              round(duct_loss / r["energy"]["total_in"] * 100, 8), "% of energy in |",
+              "ROI", round(r["roi"], 4), "->", round(new_roi, 4))
+    print()
+
+
+run_validation()
+best_design = search()
+check_leaks(best_design)
+check_duct_friction(best_design)
