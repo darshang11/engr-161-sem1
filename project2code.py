@@ -1,4 +1,5 @@
 import math
+import matplotlib.pyplot as plt
 
 # constants
 SECONDS_PER_DAY = 86400
@@ -10,6 +11,10 @@ OUTPUT_HEIGHT = 3.0
 
 TARGET_GAL_PER_DAY = 100000
 TARGET_PURITY = 0.98
+
+# how much cost and ROI count when picking the best balanced design (add to 1)
+WEIGHT_COST = 0.5
+WEIGHT_ROI = 0.5
 
 DENSITIES = {"sugar": 1599, "water": 997, "fiber": 1311, "ethanol": 789}
 SLURRY_FRACTIONS = {"sugar": 0.2, "water": 0.6, "fiber": 0.2, "ethanol": 0.0}
@@ -69,8 +74,6 @@ PIPE_COST = {
 }
 
 DUCT_COST_PER_M = 228
-DUCT_FRICTION = 0.002
-DUCT_DIAMETER = 1.0
 
 VALVE_K = {"Salvage": 800, "Questionable": 700, "Outstanding": 600, "Glorious": 500}
 
@@ -90,36 +93,38 @@ BEND_COST_90 = {0.10: 128, 0.11: 190, 0.12: 700, 0.13: 1800, 0.14: 4100, 0.15: 8
 # 0 = no leaks (the validation case assumes none)
 LEAK_FRACTION_PER_M = 0
 
-# realistic leak rate: median real leakage in Pennsylvania DEP water audits (Kunkel)
+# realistic leak rate: median real leakage in Pennsylvania DEP water audits (Kunkel, 2018)
 LEAK_GAL_PER_MILE_PER_DAY = 1401
 M_PER_MILE = 1609.34
 
-# CO2 gas density at 15 C and 1 bar (Sigma-Aldrich CO2 data sheet)
-CO2_DENSITY = 1.8474
+# upper limit: leaks above 1% of daily flow get detected (Kuprewicz, 2007)
+LEAK_UPPER_LIMIT = 0.01
 
 
-# site layout: Site 2 (team floor plan)
-# total: 97 ft of pipe, 5 bends, 8 valves, 20 ft of CO2 ductwork
-# per-segment split is estimated from the drawing, adjust to the AutoCAD numbers
+
+# site layout: Site 3 (team floor plan)
+# fermenter on the top floor, filter on the second floor,
+# distiller and dehydrator on the ground floor
+# total: 102 ft of pipe (40 ft vertical), 8 valves, 15 ft of CO2 ductwork
 FT = 0.3048
 SITE = {
-    "building_cost": 1300000,
-    "other_cost": 0,
-    "pump_to_ferm_m": 46 * FT,
+    "building_cost": 1600000 * 1.1,
+    "other_cost": 12000,
+    "pump_to_ferm_m": 18.8976,
     "pump_to_ferm_bends": 2,
-    "ferm_to_filt_m": 30 * FT,
-    "ferm_to_filt_bends": 2,
-    "filt_to_dist_m": 8 * FT,
+    "ferm_to_filt_m": 3.048,
+    "ferm_to_filt_bends": 0,
+    "filt_to_dist_m": 3.048,
     "filt_to_dist_bends": 0,
-    "dist_to_dehy_m": 8 * FT,
-    "dist_to_dehy_bends": 1,
-    "dehy_to_exit_m": 5 * FT,
+    "dist_to_dehy_m": 3.048,
+    "dist_to_dehy_bends": 0,
+    "dehy_to_exit_m": 3.048,
     "dehy_to_exit_bends": 0,
     "valves": 8,
-    "duct_m": 20 * FT,
-    "ferm_height": 25 * FT,
-    "filt_height": 0,
-    "pump_rating": 9,
+    "duct_m": 4.572,
+    "ferm_height": 12.192,
+    "filt_height": 6.096,
+    "pump_rating": 15,
 }
 
 # validation layout (Site 3 from the validation document)
@@ -576,11 +581,16 @@ def print_design(design, r):
     print("  Slurry needed:", round(r["slurry_gal"]), "gal/day")
 
 
-# Tries every catalog combo and prints the cheapest and highest-ROI designs that meet spec.
+# Gives a design a 0-to-1 score for cost and ROI, then blends them with the weights.
+def balance_score(r, cost_min, cost_max, roi_min, roi_max):
+    cost_score = (cost_max - r["cost"]) / (cost_max - cost_min)
+    roi_score = (r["roi"] - roi_min) / (roi_max - roi_min)
+    return WEIGHT_COST * cost_score + WEIGHT_ROI * roi_score
+
+
+# Tries every catalog combo and prints the cheapest, highest-ROI and best balanced designs.
 def search():
-    best_cost = None
-    best_roi = None
-    count = 0
+    passing = []
 
     for ferm in FERMENTERS:
         for filt in REMOVERS:
@@ -603,13 +613,37 @@ def search():
                                     r = run_at_target(design)
                                     if r["purity"] < TARGET_PURITY:
                                         continue
-                                    count += 1
-                                    if best_cost is None or r["cost"] < best_cost[1]["cost"]:
-                                        best_cost = (design, r)
-                                    if best_roi is None or r["roi"] > best_roi[1]["roi"]:
-                                        best_roi = (design, r)
+                                    passing.append((design, r))
 
-    print("DESIGN SEARCH:", count, "designs make 100,000 gal/day at 98% or better")
+    # find the cheapest and highest-ROI designs, and the range of cost and ROI
+    best_cost = passing[0]
+    best_roi = passing[0]
+    for item in passing:
+        if item[1]["cost"] < best_cost[1]["cost"]:
+            best_cost = item
+        if item[1]["roi"] > best_roi[1]["roi"]:
+            best_roi = item
+
+    cost_min = best_cost[1]["cost"]
+    roi_max = best_roi[1]["roi"]
+    cost_max = cost_min
+    roi_min = roi_max
+    for item in passing:
+        if item[1]["cost"] > cost_max:
+            cost_max = item[1]["cost"]
+        if item[1]["roi"] < roi_min:
+            roi_min = item[1]["roi"]
+
+    # best balanced design: highest blended score
+    best_balanced = passing[0]
+    best_score = balance_score(passing[0][1], cost_min, cost_max, roi_min, roi_max)
+    for item in passing:
+        score = balance_score(item[1], cost_min, cost_max, roi_min, roi_max)
+        if score > best_score:
+            best_score = score
+            best_balanced = item
+
+    print("DESIGN SEARCH:", len(passing), "designs make 100,000 gal/day at 98% or better")
     print()
     print("Cheapest design:")
     print_design(best_cost[0], best_cost[1])
@@ -617,25 +651,35 @@ def search():
     print("Highest ROI design:")
     print_design(best_roi[0], best_roi[1])
     print()
-    return best_cost[0]
+    print("Best balanced design (cost weight", WEIGHT_COST, "| ROI weight", str(WEIGHT_ROI) + "):")
+    print_design(best_balanced[0], best_balanced[1])
+    print()
+    return best_balanced, best_cost, best_roi, passing
 
 
 # leak check
-# Reruns one design with no leaks, a realistic leak rate and two worse leak rates.
+# Reruns one design with no leaks, a realistic leak rate and the 1% upper limit.
 def check_leaks(design):
     global LEAK_FRACTION_PER_M
 
     no_leak = run_at_target(design)
+
+    total_pipe_m = SITE["pump_to_ferm_m"] + SITE["ferm_to_filt_m"] + SITE["filt_to_dist_m"]
+    total_pipe_m += SITE["dist_to_dehy_m"] + SITE["dehy_to_exit_m"]
+
+    # realistic: water audit median, turned into a fraction of the flow per meter
     realistic_rate = (LEAK_GAL_PER_MILE_PER_DAY / M_PER_MILE) / no_leak["slurry_gal"]
+
+    # upper limit: 1% of the flow lost over all the pipe (leaks bigger than this get caught)
+    upper_limit_rate = LEAK_UPPER_LIMIT / total_pipe_m
 
     cases = [
         ("No leaks", 0),
         ("Realistic (water audit median)", realistic_rate),
-        ("Bad (0.01% per m)", 0.0001),
-        ("Worst (0.1% per m)", 0.001),
+        ("Upper limit (1% of flow)", upper_limit_rate),
     ]
 
-    print("LEAK CHECK (cheapest design, sized to 100,000 gal/day)")
+    print("LEAK CHECK (best balanced design, sized to 100,000 gal/day)")
     for name, rate in cases:
         LEAK_FRACTION_PER_M = rate
         r = run_at_target(design)
@@ -647,27 +691,50 @@ def check_leaks(design):
     print()
 
 
-# duct friction check
-# Finds the friction loss in the CO2 ductwork and compares it to the rest of the plant.
-def check_duct_friction(design):
-    r = run_at_target(design)
-    co2_mass = r["wastes"]["co2"]
-    eta_pump = PUMP_EFF[design["pump_line"]]
+# graph
+# Plots ROI vs capital cost for every design that meets spec, with the three picks marked.
+def plot_results(passing, best_cost, best_roi, best_balanced):
+    costs = []
+    rois = []
+    for item in passing:
+        costs.append(item[1]["cost"] / 1e6)
+        rois.append(item[1]["roi"])
 
-    print("CO2 DUCT FRICTION CHECK (cheapest design, sized to 100,000 gal/day)")
-    for name, rho in [("15 C", CO2_DENSITY), ("37 C (warm fermenter)", CO2_DENSITY * 288.15 / 310.15)]:
-        Q_co2 = co2_mass / rho
-        duct_loss = pipe_friction_loss(rho, Q_co2, DUCT_FRICTION, SITE["duct_m"], DUCT_DIAMETER)
-        new_total = r["energy"]["total_in"] + duct_loss / eta_pump
-        new_roi = r["energy"]["chem_out"] / new_total
-        print("  CO2 at " + name + ":",
-              "duct loss", round(duct_loss, 1), "kJ/day |",
-              round(duct_loss / r["energy"]["total_in"] * 100, 8), "% of energy in |",
-              "ROI", round(r["roi"], 4), "->", round(new_roi, 4))
-    print()
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.scatter(costs, rois, s=6, color="#b4b2a9", alpha=0.5, label="Designs that meet spec")
+    ax.axhline(10, color="#5f5e5a", linestyle="--", linewidth=1.5)
+    ax.text(3.45, 9.92, "Client goal (10x)", ha="center", va="top", fontsize=11, color="#444441")
+
+    picks = [
+        ("Cheapest", best_cost, "#2a78d6", "o", (40, -45)),
+        ("Best balanced", best_balanced, "#eb6834", "s", (40, 8)),
+        ("Highest ROI", best_roi, "#1baf7a", "^", (-150, -50)),
+    ]
+    for name, item, color, marker, offset in picks:
+        x = item[1]["cost"] / 1e6
+        y = item[1]["roi"]
+        ax.scatter([x], [y], s=120, color=color, marker=marker, edgecolors="white", linewidths=2,
+                   zorder=3, label=name)
+        ax.annotate(name + "\n$" + str(round(x, 2)) + "M, ROI " + str(round(y, 2)), (x, y),
+                    textcoords="offset points", xytext=offset, fontsize=10, color="#2c2c2a",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#b4b2a9"),
+                    arrowprops=dict(arrowstyle="-", color="#5f5e5a", linewidth=1))
+
+    ax.set_ylim(top=11.8)
+    ax.set_xlabel("Capital cost (millions of $)", fontsize=12)
+    ax.set_ylabel("Energy ROI (energy out / energy in)", fontsize=12)
+    ax.set_title("Energy ROI vs capital cost, Site 3 (100,000 gal/day, 98%+ purity)", fontsize=13)
+    ax.grid(color="#e5e4df", linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ["top", "right"]:
+        ax.spines[side].set_visible(False)
+    ax.legend(loc="lower right", frameon=False)
+    fig.tight_layout()
+    fig.savefig("roi_vs_cost.png", dpi=300)
+    plt.show()
 
 
 run_validation()
-best_design = search()
-check_leaks(best_design)
-check_duct_friction(best_design)
+best_balanced, best_cost, best_roi, passing = search()
+check_leaks(best_balanced[0])
+plot_results(passing, best_cost, best_roi, best_balanced)
